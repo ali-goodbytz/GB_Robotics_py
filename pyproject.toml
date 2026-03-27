@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gb-robotics-py"
+version = "0.1.0"
+description = "Python wrapper for GB_Robotics FK/IK .NET API"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "pythonnet>=3.0.3",
+  "numpy>=1.24",  
+  "plotly>=5.20",
+]
+
+[project.scripts]
+gb-robotics = "gb_robotics_py.cli:main"
+
+[dependency-groups]
+dev = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gb_robotics_py*"]

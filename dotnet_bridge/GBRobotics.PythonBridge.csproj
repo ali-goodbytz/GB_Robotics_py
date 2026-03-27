@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="GB_Simulator">
+      <HintPath>..\..\GB_Robotics\GB_Simulator\bin\Debug\net8.0\GB_Simulator.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <ProjectReference Include="..\..\ParallelFlow\OpenCLKernel\OpenCLKernel.csproj" />
+  </ItemGroup>
+</Project>
