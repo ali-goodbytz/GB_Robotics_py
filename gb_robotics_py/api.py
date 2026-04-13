@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 
 def _load_clr():
@@ -28,6 +28,23 @@ def _to_python(value):
         return value
 
 
+def _coerce_double_jagged(
+    frames: Sequence[Sequence[float]] | None,
+) -> list[list[float]] | None:
+    """
+    Build a plain list-of-lists of float for pythonnet → C# double[][].
+    Returns None if frames is None or empty after filtering.
+    """
+    if frames is None:
+        return None
+    out: list[list[float]] = []
+    for row in frames:
+        if row is None:
+            continue
+        out.append([float(x) for x in row])
+    return out or None
+
+
 class FanucSimulator:
     def __init__(
         self,
@@ -35,13 +52,19 @@ class FanucSimulator:
         robot_kind: str = "lrmate200id7l",
         platform_id: int = 0,
         device_id: int = 0,
+        user_frames: Sequence[Sequence[float]] | None = None,
+        tool_frames: Sequence[Sequence[float]] | None = None,
     ) -> None:
         self._assembly_dir = Path(assembly_dir).expanduser().resolve()
         self._load_assemblies(self._assembly_dir)
 
         from GBRobotics.PythonBridge import FanucSimulatorBridge  # type: ignore
 
-        self._bridge = FanucSimulatorBridge(robot_kind, int(platform_id), int(device_id))
+        uf = _coerce_double_jagged(user_frames)
+        tf = _coerce_double_jagged(tool_frames)
+        self._bridge = FanucSimulatorBridge(
+            robot_kind, uf, tf, int(platform_id), int(device_id)
+        )
 
     @staticmethod
     def _load_assemblies(assembly_dir: Path) -> None:
@@ -63,11 +86,14 @@ class FanucSimulator:
             clr.AddReference(str(dll_path))
 
     def fk(self, joint_values: Sequence[float], robot_id: int = 0, tool_id: int = -1, robot_base: Sequence[float] | None = None) -> dict:
-        # converting the robot_base from xyz + rpy to a dual quaternion
+        # Pass base as 6 floats (mm + deg); bridge converts to DualQuaternion_d (pythonnet cannot marshal nullable struct args reliably).
+        rb: list[float] | None = None
         if robot_base is not None:
-            robot_base_dq = self.xyzwpr_to_dual_quaternion(robot_base)
-        
-        result = self._bridge.Fk([float(v) for v in joint_values], int(robot_id), int(tool_id), robot_base_dq if robot_base is not None else None)
+            rb = [float(v) for v in robot_base]
+            if len(rb) != 6:
+                raise ValueError("robot_base must have exactly 6 values (X,Y,Z mm; W,P,R deg).")
+
+        result = self._bridge.Fk([float(v) for v in joint_values], int(robot_id), int(tool_id), rb)
         return {
             "link_transforms": _to_python(result.LinkTransforms),
             "tool_transforms": _to_python(result.ToolTransforms),
@@ -83,9 +109,10 @@ class FanucSimulator:
         }
     
     def xyzwpr_to_dual_quaternion(
-    xyzwpr: Sequence[float],
-    euler_order: str = "ZYX",
-    ) -> list[float]:
+        self,
+        xyzwpr: Sequence[float],
+        euler_order: str = "ZYX",
+    ) -> Any:
         """
         Convert a list of 6 values [x, y, z, w, p, r] (XYZWPR) to a dual quaternion.
 
@@ -93,16 +120,14 @@ class FanucSimulator:
         ----------
         xyzwpr : Sequence[float]
             Six values: x, y, z in millimetres; w, p, r in degrees (Fanuc convention).
-        assembly_dir : str | Path
-            Path to the directory containing ParallelFlow.dll and GB_Simulator.dll.
         euler_order : str
             Euler angle rotation order passed to QuaternionFromEulerAngles (default "ZYX").
 
         Returns
         -------
-        list[float]
-            The dual quaternion as a flat list of 8 floats:
-            [real.x, real.y, real.z, real.w, dual.x, dual.y, dual.z, dual.w]
+        DualQuaternion_d
+            CLR dual quaternion (ParallelFlow.Types). ``FanucSimulator.fk`` passes ``robot_base``
+            as six floats to the bridge instead; use this helper when you need the quaternion object.
         """
         if len(xyzwpr) != 6:
             raise ValueError(f"xyzwpr must have exactly 6 values, got {len(xyzwpr)}.")
@@ -135,7 +160,7 @@ class FanucSimulator:
 
         # Build rotation quaternion from euler angles
         q = IQuaternionExtensions.QuaternionFromEulerAngles[
-            float, Vector4_d, Quaternion_d
+            double, Vector4_d, Quaternion_d
         ](euler_angles, euler_order)
 
         # Build translation vector (x, y, z)
@@ -143,8 +168,8 @@ class FanucSimulator:
 
         # Combine into dual quaternion
         return DualQuaternionExtensions.FromRotationAndTranslation[
-            float, Vector4_d, Quaternion_d, DualQuaternion_d
-        ]
+            double, Vector4_d, Quaternion_d, DualQuaternion_d
+        ](q, translation)
 
     def close(self) -> None:
         if self._bridge is not None:

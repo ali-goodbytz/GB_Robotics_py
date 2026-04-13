@@ -14,7 +14,7 @@ public sealed class FanucSimulatorBridge : IDisposable
     private readonly Simulator<double, Vector4_d, Quaternion_d, Vector8_d, DualQuaternion_d, Pose_d, Matrix4x4_d> _simulator;
     private bool _disposed;
 
-    public FanucSimulatorBridge(string robotKind = "lrmate200id7l", int platformId = 0, int deviceId = 0)
+    public FanucSimulatorBridge(string robotKind = "lrmate200id7l", double[][]? userFrames = null, double[][]? toolFrames = null, int platformId = 0, int deviceId = 0)
     {
         //ParallelFlow.Kernel.Config.PlatformId = platformId;
         //ParallelFlow.Kernel.Config.DeviceId = deviceId;
@@ -27,17 +27,60 @@ public sealed class FanucSimulatorBridge : IDisposable
         _controller = new Controller<double, Vector4_d, Quaternion_d, Vector8_d, DualQuaternion_d, Pose_d, Matrix4x4_d>();
         Console.WriteLine("Building model for robot kind: " + robotKind);
         _controller.AddRobot(BuildModel(robotKind));
+        
+        
+        
+        
         Console.WriteLine("Model built successfully");
-        _simulator = new Simulator<double, Vector4_d, Quaternion_d, Vector8_d, DualQuaternion_d, Pose_d, Matrix4x4_d>(_compute, _controller);
+        // adding the user frames and tool frames to the simulator
+        
+        if (userFrames is not null)
+        {
+            int i = 0;
+            foreach (var frame in userFrames)
+            {
+                var pose = PoseExtensions.FromXYZWPR<double, Vector4_d, Quaternion_d, Vector8_d, DualQuaternion_d, Pose_d>(frame);
+                _controller.AddUserFrame(new UserFrame<double, Vector4_d, Quaternion_d, DualQuaternion_d>($"uframe_{i++}", pose.Pose.AsDualQuaternion<double, Vector4_d, Quaternion_d,Vector8_d, DualQuaternion_d>()));
+            }
+        }
+        if (toolFrames is not null)
+        {
+            int i = 0;
+            foreach (var frame in toolFrames)
+            {
+                var pose = PoseExtensions.FromXYZWPR<double, Vector4_d, Quaternion_d, Vector8_d, DualQuaternion_d, Pose_d>(frame);
+                _controller.AddTool(new Tool<double, Vector4_d, Quaternion_d, DualQuaternion_d>($"tframe_{i++}", pose.Pose.AsDualQuaternion<double, Vector4_d, Quaternion_d,Vector8_d, DualQuaternion_d>()));
+            }
+        }
+        
+        
+        _simulator = new Simulator<double, Vector4_d, Quaternion_d, Vector8_d, DualQuaternion_d, Pose_d, Matrix4x4_d>(_compute, _controller);        
         Console.WriteLine("Simulator created successfully");
+        
     }
 
-    public FkResult Fk(double[] jointValues, int robotId = 0, int toolId = -1, DualQuaternion_d? robotBase = null)
+    /// <summary>
+    /// Optional robot base as Fanuc XYZWPR: X,Y,Z in millimetres and W,P,R in degrees (same convention as the Python API).
+    /// Passed as a length-6 array so pythonnet can marshal it; converted here to <see cref="DualQuaternion_d"/>.
+    /// </summary>
+    public FkResult Fk(double[] jointValues, int robotId = 0, int toolId = -1, double[]? robotBaseXyzwprMillimetresDegrees = null)
     {
         if (jointValues is null)
         {
             throw new ArgumentNullException(nameof(jointValues));
         }
+
+        DualQuaternion_d? robotBase = null;
+        if (robotBaseXyzwprMillimetresDegrees is not null)
+        {
+            if (robotBaseXyzwprMillimetresDegrees.Length != 6)
+            {
+                throw new ArgumentException("robotBaseXyzwprMillimetresDegrees must have exactly 6 values (X,Y,Z mm; W,P,R deg).", nameof(robotBaseXyzwprMillimetresDegrees));
+            }
+
+            robotBase = RobotBaseDualQuaternionFromXyzwpr(robotBaseXyzwprMillimetresDegrees);
+        }
+
         // converting joint vakues from degrees to radians
         for (int i = 0; i < jointValues.Length; i++)
         {
@@ -67,6 +110,16 @@ public sealed class FanucSimulatorBridge : IDisposable
         var joints = solutions.Select(PoseToJointArray).ToArray();
 
         return new IkResult(joints, isValid);
+    }
+
+    private static DualQuaternion_d RobotBaseDualQuaternionFromXyzwpr(double[] xyzwpr)
+    {
+        double x = xyzwpr[0], y = xyzwpr[1], z = xyzwpr[2];
+        double wDeg = xyzwpr[3], pDeg = xyzwpr[4], rDeg = xyzwpr[5];
+        var eulerAngles = new Vector4_d(wDeg * Math.PI / 180.0, pDeg * Math.PI / 180.0, rDeg * Math.PI / 180.0, 0.0);
+        var q = IQuaternionExtensions.QuaternionFromEulerAngles<double, Vector4_d, Quaternion_d>(eulerAngles, "ZYX");
+        var translation = new Vector4_d(x, y, z, 0.0);
+        return DualQuaternionExtensions.FromRotationAndTranslation<double, Vector4_d, Quaternion_d, DualQuaternion_d>(q, translation);
     }
 
     private static Model<double, Vector4_d, Quaternion_d, Vector8_d, DualQuaternion_d, Pose_d, Matrix4x4_d> BuildModel(string robotKind)
@@ -153,8 +206,12 @@ public sealed class FanucSimulatorBridge : IDisposable
             return;
         }
 
-        var message = string.Empty;
-        _compute.CleanUp(ref message, true);
+        if (_compute is not null)
+        {
+            var message = string.Empty;
+            _compute.CleanUp(ref message, true);
+        }
+
         _disposed = true;
         GC.SuppressFinalize(this);
     }

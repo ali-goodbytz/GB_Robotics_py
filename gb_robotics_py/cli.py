@@ -7,7 +7,8 @@ import json
 from pathlib import Path
 
 from .api import FanucSimulator
-from .view_joint_log import run_view_joint_log,add_view_joint_log_subparser
+from .view_joint_log import add_view_joint_log_subparser, run_view_joint_log
+from .vis_graph_cmd import add_view_graph_subparser, run_view_graph
 
 
 
@@ -83,6 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
     # --- view_joint_log (registered from its own module) ---------------------
     add_view_joint_log_subparser(subparsers)
 
+    # --- view_graph (motion graph TCP viewer) --------------------------------
+    add_view_graph_subparser(subparsers)
+
     return parser
 
 
@@ -97,10 +101,15 @@ def main() -> int:
     if args.command == "view_joint_log":
         return run_view_joint_log(args)
 
+    if args.command == "view_graph":
+        return run_view_graph(args)
+
     try:
         with FanucSimulator(
             assembly_dir=args.assembly_dir,
             robot_kind=args.robot_kind,
+            user_frames=getattr(args, "user_frames", None),
+            tool_frames=getattr(args, "tool_frames", None),
             platform_id=args.platform_id,
             device_id=args.device_id,
         ) as sim:
