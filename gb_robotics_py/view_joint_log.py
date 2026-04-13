@@ -170,6 +170,8 @@ def _launch_3d_viewer(
         y=positions[:, 1],
         z=positions[:, 2],
         mode="markers",
+        text=[f"Row {i}" for i in range(n)],
+        hovertemplate="%{text}<br>X: %{x:.1f}<br>Y: %{y:.1f}<br>Z: %{z:.1f}<extra></extra>",
         name="Log poses",
         marker=dict(
             size=2,
@@ -181,18 +183,7 @@ def _launch_3d_viewer(
         ),
     ))
 
-    # --- Start / end markers -------------------------------------------------
-    for label, idx, color in (("Start", 0, "lime"), ("End", -1, "crimson")):
-        traces.append(go.Scatter3d(
-            x=[positions[idx, 0]],
-            y=[positions[idx, 1]],
-            z=[positions[idx, 2]],
-            mode="markers+text",
-            name=label,
-            text=[label],
-            textposition="top center",
-            marker=dict(size=8, color=color),
-        ))
+    
 
     # --- Register poses ------------------------------------------------------
     if register_poses:
@@ -243,7 +234,33 @@ def _launch_3d_viewer(
         legend=dict(bgcolor="#2a2a2a", bordercolor="#555", borderwidth=1),
         margin=dict(l=0, r=0, t=40, b=0),
     )
-    fig.show()
+    #fig.show()
+    import tempfile
+    import webbrowser
+
+    html_path = Path(tempfile.mktemp(suffix="_robot_tool_path.html"))
+    fig.write_html(
+        str(html_path),
+        include_plotlyjs="cdn",
+        post_script="""
+        var btn = document.createElement('button');
+        btn.innerText = '💾 Save as HTML';
+        btn.style.cssText = 'position:fixed;top:10px;right:10px;z-index:9999;'
+            + 'padding:8px 14px;background:#4FC3F7;color:#000;border:none;'
+            + 'border-radius:6px;cursor:pointer;font-size:14px;font-weight:bold;';
+        btn.onclick = function() {
+            var blob = new Blob([document.documentElement.outerHTML],
+                                {type: 'text/html'});
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'robot_tool_path.html';
+            a.click();
+        };
+        document.body.appendChild(btn);
+        """
+    )
+    webbrowser.open(html_path.resolve().as_uri())
+
 
 
 # ---------------------------------------------------------------------------
