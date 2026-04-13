@@ -100,6 +100,40 @@ class FanucSimulator:
             "out_of_range": _to_python(result.OutOfRange),
         }
 
+    def fk_batch(
+        self,
+        joint_rows: Sequence[Sequence[float]],
+        robot_id: int = 0,
+        tool_id: int = -1,
+        robot_base: Sequence[float] | None = None,
+    ) -> dict:
+        """
+        Run forward kinematics for many joint configurations in one GPU batched call.
+
+        Parameters
+        ----------
+        joint_rows
+            Each row is one pose: 6 or 7 joint values in **degrees** (same convention as ``fk``).
+        robot_id, tool_id, robot_base
+            Same meaning as ``fk``.
+        """
+        rows = [[float(v) for v in row] for row in joint_rows]
+        if not rows:
+            raise ValueError("joint_rows must contain at least one row.")
+
+        rb: list[float] | None = None
+        if robot_base is not None:
+            rb = [float(v) for v in robot_base]
+            if len(rb) != 6:
+                raise ValueError("robot_base must have exactly 6 values (X,Y,Z mm; W,P,R deg).")
+
+        result = self._bridge.FkBatch(rows, int(robot_id), int(tool_id), rb)
+        return {
+            "link_transforms": _to_python(result.LinkTransformsPerPose),
+            "tool_transforms": _to_python(result.ToolTransformsPerPose),
+            "out_of_range": _to_python(result.OutOfRangePerPose),
+        }
+
     def ik(self, end_effector_transforms: Iterable[Sequence[float]], robot_id: int = 0) -> dict:
         transforms = [[float(v) for v in matrix] for matrix in end_effector_transforms]
         result = self._bridge.Ik(transforms, int(robot_id))

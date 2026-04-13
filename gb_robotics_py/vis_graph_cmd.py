@@ -20,6 +20,60 @@ from .vis_graph_data import (
 from .vis_graph_html import write_vis_graph_html
 
 
+def _build_joint_tcp_lookup(
+    sim,
+    graph,
+    registers_raw: list[dict] | None,
+    tool_id: int,
+    robot_base: list[float] | None,
+) -> dict[tuple[float, ...], tuple[float, float, float] | None]:
+    """
+    Unique joint configurations from the graph (and optional registers), one GPU fk_batch.
+    """
+    ordered: list[list[float]] = []
+    seen: set[tuple[float, ...]] = set()
+
+    def add(joints: object) -> None:
+        if not isinstance(joints, (list, tuple)):
+            return
+        try:
+            row = [float(x) for x in joints]
+        except (TypeError, ValueError):
+            return
+        key = tuple(row)
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append(row)
+
+    for node in graph.nodes:
+        add(node.joint_pose.joints)
+    for edge in graph.edges:
+        for sample in edge.samples or []:
+            add(sample.joint_pose.joints)
+    if registers_raw:
+        for reg in registers_raw:
+            add(reg.get("joints"))
+
+    if not ordered:
+        return {}
+
+    batch = sim.fk_batch(ordered, robot_id=0, tool_id=tool_id, robot_base=robot_base)
+    link_tp = batch.get("link_transforms") or []
+    out: dict[tuple[float, ...], tuple[float, float, float] | None] = {}
+    for i, row in enumerate(ordered):
+        key = tuple(row)
+        if i >= len(link_tp):
+            out[key] = None
+            continue
+        lt = link_tp[i]
+        if not lt:
+            out[key] = None
+        else:
+            out[key] = matrix_row_major_to_xyz(lt[-1])
+    return out
+
+
 def _try_inject_gb_python_path(
     cli_root: Path | None,
     env_root: str | None,
@@ -243,29 +297,15 @@ def run(args: Namespace) -> int:
         platform_id=int(args.platform_id),
         device_id=int(args.device_id),
     ) as sim:
-        cache: dict[tuple[float, ...], tuple[float, float, float] | None] = {}
+        lookup = _build_joint_tcp_lookup(
+            sim, graph, registers_raw, tool_id, robot_base
+        )
 
         def joint_to_tcp_one(
             joints: tuple[float, ...] | list[float],
         ) -> tuple[float, float, float] | None:
             key = tuple(float(x) for x in joints)
-            if key in cache:
-                return cache[key]
-            try:
-                fk = sim.fk(
-                    list(key),
-                    robot_id=0,
-                    tool_id=tool_id,
-                    robot_base=robot_base,
-                )
-                lt = fk.get("link_transforms") or []
-                if not lt:
-                    cache[key] = None
-                else:
-                    cache[key] = matrix_row_major_to_xyz(lt[-1])
-            except Exception:
-                cache[key] = None
-            return cache[key]
+            return lookup.get(key)
 
         nodes, edges, registers, warnings = build_scene(
             graph,

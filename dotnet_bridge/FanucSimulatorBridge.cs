@@ -60,8 +60,105 @@ public sealed class FanucSimulatorBridge : IDisposable
     }
 
     /// <summary>
-    /// Optional robot base as Fanuc XYZWPR: X,Y,Z in millimetres and W,P,R in degrees (same convention as the Python API).
-    /// Passed as a length-6 array so pythonnet can marshal it; converted here to <see cref="DualQuaternion_d"/>.
+    /// Batched forward kinematics on the GPU via <c>Simulator.FK(POS[] ...)</c>.
+    /// Each row is one pose: joint values in <b>degrees</b> (same as <see cref="Fk"/>), 6 or 7 values per row.
+    /// </summary>
+    public FkBatchResult FkBatch(
+        double[][] jointRowsDegrees,
+        int robotId = 0,
+        int toolId = -1,
+        double[]? robotBaseXyzwprMillimetresDegrees = null)
+    {
+        if (jointRowsDegrees is null || jointRowsDegrees.Length == 0)
+        {
+            throw new ArgumentException("At least one joint row is required.", nameof(jointRowsDegrees));
+        }
+
+        Pose_d? robotBasePose = null;
+        if (robotBaseXyzwprMillimetresDegrees is not null)
+        {
+            if (robotBaseXyzwprMillimetresDegrees.Length != 6)
+            {
+                throw new ArgumentException(
+                    "robotBaseXyzwprMillimetresDegrees must have exactly 6 values (X,Y,Z mm; W,P,R deg).",
+                    nameof(robotBaseXyzwprMillimetresDegrees));
+            }
+
+            robotBasePose = PoseExtensions.FromXYZWPR<double, Vector4_d, Quaternion_d, Vector8_d, DualQuaternion_d, Pose_d>(
+                robotBaseXyzwprMillimetresDegrees);
+        }
+
+        int poseCount = jointRowsDegrees.Length;
+        var poses = new Pose_d[poseCount];
+        for (int i = 0; i < poseCount; i++)
+        {
+            var row = jointRowsDegrees[i];
+            if (row is null)
+            {
+                throw new ArgumentException($"Joint row at index {i} is null.", nameof(jointRowsDegrees));
+            }
+
+            var rad = new double[row.Length];
+            for (int j = 0; j < row.Length; j++)
+            {
+                rad[j] = row[j] * Math.PI / 180.0;
+            }
+
+            var full = new double[7];
+            for (int j = 0; j < Math.Min(7, rad.Length); j++)
+            {
+                full[j] = rad[j];
+            }
+
+            poses[i] = new Pose_d(full);
+        }
+
+        _simulator.FK(
+            poses,
+            out bool[][] outOfRangeJointPose,
+            out Matrix4x4_d[][] linkTransformPerLink,
+            out Matrix4x4_d[]? toolTransforms,
+            robotId,
+            toolId,
+            robotBasePose);
+
+        int nLinks = linkTransformPerLink.Length;
+        var linkPerPose = new double[poseCount][][];
+        for (int p = 0; p < poseCount; p++)
+        {
+            linkPerPose[p] = new double[nLinks][];
+            for (int L = 0; L < nLinks; L++)
+            {
+                linkPerPose[p][L] = MatrixToArray(linkTransformPerLink[L][p]);
+            }
+        }
+
+        double[][]? toolPerPose = null;
+        if (toolTransforms is not null)
+        {
+            toolPerPose = new double[poseCount][];
+            for (int p = 0; p < poseCount; p++)
+            {
+                toolPerPose[p] = MatrixToArray(toolTransforms[p]);
+            }
+        }
+
+        int nJoints = outOfRangeJointPose.Length;
+        var outPerPose = new bool[poseCount][];
+        for (int p = 0; p < poseCount; p++)
+        {
+            outPerPose[p] = new bool[nJoints];
+            for (int j = 0; j < nJoints; j++)
+            {
+                outPerPose[p][j] = outOfRangeJointPose[j][p];
+            }
+        }
+
+        return new FkBatchResult(linkPerPose, toolPerPose, outPerPose);
+    }
+
+    /// <summary>
+    /// Single-pose FK; implemented via <see cref="FkBatch"/> (GPU path when batch size is 1).
     /// </summary>
     public FkResult Fk(double[] jointValues, int robotId = 0, int toolId = -1, double[]? robotBaseXyzwprMillimetresDegrees = null)
     {
@@ -70,31 +167,10 @@ public sealed class FanucSimulatorBridge : IDisposable
             throw new ArgumentNullException(nameof(jointValues));
         }
 
-        DualQuaternion_d? robotBase = null;
-        if (robotBaseXyzwprMillimetresDegrees is not null)
-        {
-            if (robotBaseXyzwprMillimetresDegrees.Length != 6)
-            {
-                throw new ArgumentException("robotBaseXyzwprMillimetresDegrees must have exactly 6 values (X,Y,Z mm; W,P,R deg).", nameof(robotBaseXyzwprMillimetresDegrees));
-            }
-
-            robotBase = RobotBaseDualQuaternionFromXyzwpr(robotBaseXyzwprMillimetresDegrees);
-        }
-
-        // converting joint vakues from degrees to radians
-        for (int i = 0; i < jointValues.Length; i++)
-        {
-            jointValues[i] = jointValues[i] * Math.PI / 180;
-        }
-        var outOfRangeInput = new bool[jointValues.Length];
-        var linkTransforms = _simulator
-            .FK(jointValues, outOfRangeInput, robotId, toolId, robotBase ?? null)
-            .Select(MatrixToArray)
-            .ToArray();
-
-        // Simulator.FK(N[]...) currently does not expose the updated out-of-range values (parameter is not ref/out).
-        // Return the allocated flags so the API shape remains stable.
-        return new FkResult(linkTransforms, null, outOfRangeInput);
+        var row = new double[jointValues.Length];
+        Array.Copy(jointValues, row, jointValues.Length);
+        var batch = FkBatch(new[] { row }, robotId, toolId, robotBaseXyzwprMillimetresDegrees);
+        return new FkResult(batch.LinkTransformsPerPose[0], null, batch.OutOfRangePerPose[0]);
     }
 
     public IkResult Ik(double[][] endEffectorTransforms, int robotId = 0)
@@ -110,16 +186,6 @@ public sealed class FanucSimulatorBridge : IDisposable
         var joints = solutions.Select(PoseToJointArray).ToArray();
 
         return new IkResult(joints, isValid);
-    }
-
-    private static DualQuaternion_d RobotBaseDualQuaternionFromXyzwpr(double[] xyzwpr)
-    {
-        double x = xyzwpr[0], y = xyzwpr[1], z = xyzwpr[2];
-        double wDeg = xyzwpr[3], pDeg = xyzwpr[4], rDeg = xyzwpr[5];
-        var eulerAngles = new Vector4_d(wDeg * Math.PI / 180.0, pDeg * Math.PI / 180.0, rDeg * Math.PI / 180.0, 0.0);
-        var q = IQuaternionExtensions.QuaternionFromEulerAngles<double, Vector4_d, Quaternion_d>(eulerAngles, "ZYX");
-        var translation = new Vector4_d(x, y, z, 0.0);
-        return DualQuaternionExtensions.FromRotationAndTranslation<double, Vector4_d, Quaternion_d, DualQuaternion_d>(q, translation);
     }
 
     private static Model<double, Vector4_d, Quaternion_d, Vector8_d, DualQuaternion_d, Pose_d, Matrix4x4_d> BuildModel(string robotKind)
@@ -238,6 +304,28 @@ public sealed class FkResult
     public double[][] LinkTransforms { get; }
     public double[][]? ToolTransforms { get; }
     public bool[] OutOfRange { get; }
+}
+
+/// <summary>
+/// One GPU batched FK call: <see cref="FanucSimulatorBridge.FkBatch"/>.
+/// </summary>
+public sealed class FkBatchResult
+{
+    public FkBatchResult(double[][][] linkTransformsPerPose, double[][]? toolTransformsPerPose, bool[][] outOfRangePerPose)
+    {
+        LinkTransformsPerPose = linkTransformsPerPose;
+        ToolTransformsPerPose = toolTransformsPerPose;
+        OutOfRangePerPose = outOfRangePerPose;
+    }
+
+    /// <summary>Shape [pose][link][16] row-major 4×4.</summary>
+    public double[][][] LinkTransformsPerPose { get; }
+
+    /// <summary>Shape [pose][16] when tool_id ≥ 0; otherwise null.</summary>
+    public double[][]? ToolTransformsPerPose { get; }
+
+    /// <summary>Shape [pose][joint].</summary>
+    public bool[][] OutOfRangePerPose { get; }
 }
 
 public sealed class IkResult

@@ -387,37 +387,49 @@ def run(args) -> int:
     skipped = 0
 
     print(f"Running FK on {len(data_rows)} rows...")
+    joint_rows: list[list[float]] = []
+    row_numbers: list[int] = []
+    for row_idx, row in enumerate(data_rows):
+        try:
+            joints = [float(row[i]) for i in col_indices]
+        except (IndexError, ValueError):
+            skipped += 1
+            continue
+        joint_rows.append(joints)
+        row_numbers.append(row_idx + 2)
+
+    if not joint_rows:
+        print("ERROR: No valid data rows to run FK on.")
+        return 1
+
     with FanucSimulator(
         assembly_dir=assembly_dir,
         robot_kind=args.robot_name,
         platform_id=args.platform_id,
         device_id=args.device_id,
     ) as sim:
-        for row_idx, row in enumerate(data_rows):
-            try:
-                joints = [float(row[i]) for i in col_indices]
-            except (IndexError, ValueError):
+        try:
+            fk_batch = sim.fk_batch(
+                joint_rows,
+                robot_id=0,
+                tool_id=tool_id,
+                robot_base=robot_base,
+            )
+        except Exception as exc:
+            print(f"ERROR: batched FK failed — {exc}")
+            return 1
+
+        link_tp = fk_batch.get("link_transforms") or []
+        for i, joints in enumerate(joint_rows):
+            line_no = row_numbers[i]
+            if i >= len(link_tp):
+                print(f"  WARNING row {line_no}: missing FK result")
                 skipped += 1
                 continue
-
-            try:
-                fk = sim.fk(
-                    joints,
-                    robot_id=0,
-                    tool_id=tool_id,
-                    robot_base=robot_base,
-                )
-            except Exception as exc:
-                print(f"  WARNING row {row_idx + 2}: FK failed — {exc}")
-                skipped += 1
-                continue
-
-            link_transforms = fk["link_transforms"]
+            link_transforms = link_tp[i]
             if not link_transforms:
                 skipped += 1
                 continue
-
-            # Last element in link_transforms = tool (TCP) pose
             tool_matrices.append(link_transforms[-1])
 
     if not tool_matrices:
@@ -445,21 +457,47 @@ def run(args) -> int:
         raw_registers = reg_data.get("registers", [])
         register_poses = []
         print(f"Resolving FK for {len(raw_registers)} register poses...")
+        reg_joint_rows: list[list[float]] = []
+        valid_regs: list[dict] = []
+        for reg in raw_registers:
+            joints = reg.get("joints")
+            if not isinstance(joints, list):
+                print(f"  WARNING register '{reg.get('label', '?')}': missing joints list.")
+                continue
+            try:
+                jt = [float(v) for v in joints]
+            except (TypeError, ValueError):
+                print(f"  WARNING register '{reg.get('label', '?')}': invalid joints.")
+                continue
+            reg_joint_rows.append(jt)
+            valid_regs.append(reg)
+
         with FanucSimulator(
             assembly_dir=assembly_dir,
             robot_kind=args.robot_name,
             platform_id=args.platform_id,
             device_id=args.device_id,
         ) as sim:
-            for reg in raw_registers:
+            if reg_joint_rows:
                 try:
-                    fk = sim.fk(reg["joints"], robot_id=0, tool_id=tool_id, robot_base=robot_base)
-                    lt = fk["link_transforms"]
+                    reg_fk = sim.fk_batch(
+                        reg_joint_rows,
+                        robot_id=0,
+                        tool_id=tool_id,
+                        robot_base=robot_base,
+                    )
+                except Exception as exc:
+                    print(f"ERROR: batched FK (registers) failed — {exc}")
+                    return 1
+                reg_lt = reg_fk.get("link_transforms") or []
+                for i, reg in enumerate(valid_regs):
+                    if i >= len(reg_lt):
+                        print(f"  WARNING register '{reg.get('label', '?')}': missing FK result")
+                        continue
+                    lt = reg_lt[i]
                     if lt:
                         reg["_xyz"] = _matrix_to_xyz(lt[-1])
                         register_poses.append(reg)
-                except Exception as exc:
-                    print(f"  WARNING register '{reg.get('label', '?')}': FK failed — {exc}")
 
     print("Launching 3-D viewer — drag to orbit, scroll to zoom, right-drag to pan.")
     _launch_3d_viewer(tool_matrices, frame_scale=frame_scale, register_poses=register_poses)
